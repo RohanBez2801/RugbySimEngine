@@ -4,15 +4,17 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Callable
 import streamlit as st
 import pandas as pd
+import matplotlib.pyplot as plt
+from io import BytesIO
 
 # ==========================================
-# CORE LOGIC (UNCHANGED)
+# 1. CORE LOGIC & PHYSICS ENGINE
 # ==========================================
 
 class FieldZone:
-    OWN_HALF = "own_half"
-    OPP_HALF = "opp_half"
-    RED_ZONE = "red_zone"
+    OWN_HALF = "Own Half (0-50m)"
+    OPP_HALF = "Opp Half (50-22m)"
+    RED_ZONE = "Red Zone (<22m)"
 
 ZONE_MODIFIERS = {
     FieldZone.OWN_HALF: {"gain": 0.9, "risk": 0.9},
@@ -20,55 +22,55 @@ ZONE_MODIFIERS = {
     FieldZone.RED_ZONE: {"gain": 0.6, "risk": 1.4},
 }
 
-PHASE_DECAY_START = 4
+class DefenseSystem:
+    DRIFT = "Drift Defense"
+    BLITZ = "Blitz Defense"
+    COMPRESSED = "Compressed/Heavy Ruck"
+
+DEFENSE_LOGIC = {
+    DefenseSystem.DRIFT: {
+        "weakness": "Power Pod", "strength": "Edge Sweep", "risk_mod": 0.8
+    },
+    DefenseSystem.BLITZ: {
+        "weakness": "Tip On", "strength": "Out The Back", "risk_mod": 1.5
+    },
+    DefenseSystem.COMPRESSED: {
+        "weakness": "Out The Back", "strength": "Power Pod", "risk_mod": 1.1
+    }
+}
+
+class Source:
+    OPEN_PLAY = "Open Play / Turnover"
+    SCRUM = "Scrum (Stable Platform)"
+    LINEOUT = "Lineout (Stable Platform)"
 
 @dataclass
 class Archetype:
     name: str
     carry_bonus: float
-    distribution_bonus: float
-    collision_resistance: float
     decision_bonus: float
 
 ARCHETYPES = {
-    "power_12": Archetype("Power 12", 1.3, 0.9, 1.3, 1.0),
-    "playmaker_10": Archetype("Playmaker 10", 0.9, 1.4, 0.9, 1.3),
-    "edge_finisher": Archetype("Edge Finisher", 1.2, 0.8, 1.0, 1.1),
-    "workhorse_cleaner": Archetype("Cleaner", 1.0, 0.8, 1.4, 0.9),
+    "Power 12": Archetype("Power 12", 1.3, 1.0),
+    "Playmaker 10": Archetype("Playmaker 10", 0.9, 1.3),
+    "Edge Finisher": Archetype("Edge Finisher", 1.2, 1.1),
+    "Forward Pod": Archetype("Forward Pod", 1.1, 0.9),
 }
 
 @dataclass
 class Player:
     name: str
     archetype: Archetype
-    stamina: float = 100.0
-
-    def fatigue(self, amount: float):
-        self.stamina = max(0, self.stamina - amount)
-
-@dataclass
-class Team:
-    name: str
-    players: List[Player]
-
-@dataclass
-class Ruck:
-    speed: str = "quick"
-
-@dataclass
-class Ball:
-    carrier: Player
 
 @dataclass
 class GameState:
-    attack: Team
-    defense: Team
-    ball: Ball
-    zone: str = FieldZone.OPP_HALF
+    zone: str
+    defense_type: str
+    ruck_speed: str
+    source: str
     phase: int = 1
-    meters: float = 0.0
+    meters_gained: float = 0.0
     turnover: bool = False
-    ruck: Ruck = field(default_factory=Ruck)
 
 @dataclass
 class ShapeMove:
@@ -76,153 +78,166 @@ class ShapeMove:
     risk: float
     base_gain: float
 
-    def execute(self, state: GameState):
-        carrier = state.ball.carrier
-        
-        # Physics calculations
-        decay = 1.0
-        if state.phase >= PHASE_DECAY_START:
-            decay -= 0.1 * (state.phase - PHASE_DECAY_START + 1)
-
+    def execute(self, state: GameState, carrier: Player):
+        # 1. Context Modifiers
         zone_mod = ZONE_MODIFIERS[state.zone]
-        ruck_mult = {"quick": 1.2, "normal": 1.0, "slow": 0.7}[state.ruck.speed]
+        ruck_mult = {"quick": 1.2, "normal": 1.0, "slow": 0.7}[state.ruck_speed]
+        
+        # 2. Defense Interaction
+        def_stats = DEFENSE_LOGIC[state.defense_type]
+        def_mod = 1.0
+        
+        if self.name == def_stats["weakness"]:
+            def_mod = 1.3 
+        elif self.name == def_stats["strength"]:
+            def_mod = 0.7
+            state.turnover = True if random.random() < 0.4 else False
 
-        # Calculate Gain
+        # 3. Source Bonus (Set Piece Platform)
+        # Structured plays (Scrum/Lineout) are 20% safer on first phase
+        source_safety = 1.0
+        if state.source in [Source.SCRUM, Source.LINEOUT] and state.phase == 1:
+            source_safety = 0.8 # Reduces risk
+
+        # 4. Calculate Gain
         gain = (
-            self.base_gain * decay * ruck_mult * carrier.archetype.carry_bonus * zone_mod["gain"]
+            self.base_gain * ruck_mult * carrier.archetype.carry_bonus * zone_mod["gain"] * def_mod
         )
         gain *= random.uniform(0.8, 1.2)
-        state.meters += max(0, gain)
+        state.meters_gained += max(0, gain)
 
-        # Calculate Risk
-        error = self.risk * zone_mod["risk"]
-        error /= carrier.archetype.decision_bonus
+        # 5. Calculate Risk
+        error_prob = self.risk * zone_mod["risk"] * def_stats["risk_mod"] * source_safety
+        error_prob /= carrier.archetype.decision_bonus
 
-        if random.random() < error:
+        if random.random() < error_prob:
             state.turnover = True
 
-        # Update Game State
-        if state.meters > 50: state.zone = FieldZone.RED_ZONE
-        
-        roll = random.random()
-        state.ruck.speed = "quick" if roll > 0.6 else "normal" if roll > 0.25 else "slow"
-        state.phase += 1
-
-class RugbySimulator:
-    def __init__(self, moves: Dict[str, ShapeMove]):
-        self.moves = moves
-
-    def simulate(self, state: GameState, plan: List[str]):
-        for name in plan:
-            if state.turnover: break
-            self.moves[name].execute(state)
-        return state
-
-class Recommender:
-    def __init__(self, simulator: RugbySimulator):
-        self.sim = simulator
-
-    def recommend(self, state_factory: Callable[[], GameState], candidates: List[str], runs=200):
-        scores = {}
-        for move in candidates:
-            meters = []
-            turnovers = 0
-            for _ in range(runs):
-                state = state_factory()
-                end = self.sim.simulate(state, [move])
-                meters.append(end.meters)
-                if end.turnover: turnovers += 1
-            
-            avg_meters = statistics.mean(meters)
-            risk_pct = (turnovers / runs) * 100
-            # A simple "Utility Score": Meters minus penalty for high risk
-            scores[move] = {"avg_meters": avg_meters, "risk": risk_pct}
-        return scores
-
 # ==========================================
-# DASHBOARD INTERFACE (STREAMLIT)
+# 2. VISUALIZATION ENGINE
 # ==========================================
 
-# 1. Setup Data
+def draw_pitch_outcome(start_meters, gain, move_name, turnover):
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.set_facecolor('#2E8B57')
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0, 50)
+    
+    lines = [0, 22, 50, 78, 100]
+    for line in lines:
+        ax.axvline(x=line, color='white', linestyle='-', alpha=0.7)
+    
+    ax.text(50, 2, "Halfway", color='white', ha='center', alpha=0.8)
+    ax.text(22, 2, "22m", color='white', ha='center', alpha=0.8)
+    
+    end_point = start_meters + gain
+    color = 'red' if turnover else 'yellow'
+    
+    ax.arrow(start_meters, 25, gain, 0, head_width=2, head_length=2, fc=color, ec=color, width=0.5)
+    ax.plot(start_meters, 25, 'bo', markersize=10)
+    
+    if turnover:
+        ax.text(end_point, 28, "❌ TURNOVER", color='white', fontweight='bold')
+    else:
+        ax.plot(end_point, 25, 'wo', markersize=10)
+        ax.text(end_point, 28, f"+{gain:.1f}m", color='white', fontweight='bold')
+
+    ax.set_yticks([])
+    ax.set_title(f"Simulation: {move_name}", color='black')
+    return fig
+
+# ==========================================
+# 3. DASHBOARD INTERFACE
+# ==========================================
+
 SHAPES = {
-    "Power Pod": ShapeMove("Power Pod", 0.15, 4.2),
-    "Tip On": ShapeMove("Tip On", 0.18, 4.8),
-    "Out The Back": ShapeMove("Out The Back", 0.25, 7.0),
-    "Screen Play": ShapeMove("Screen Play", 0.22, 6.4),
-    "Edge Sweep": ShapeMove("Edge Sweep", 0.18, 6.6),
+    "Power Pod": ShapeMove("Power Pod", 0.10, 3.5),
+    "Tip On": ShapeMove("Tip On", 0.15, 4.8),
+    "Out The Back": ShapeMove("Out The Back", 0.25, 7.5),
+    "Screen Play": ShapeMove("Screen Play", 0.20, 6.4),
+    "Edge Sweep": ShapeMove("Edge Sweep", 0.18, 5.8),
 }
 
-# 2. Sidebar Controls
-st.set_page_config(page_title="Rugby Tactical Engine", layout="wide")
-st.sidebar.title("🏉 Match Context")
+st.set_page_config(page_title="Rugby Tactical Engine V3", layout="wide")
 
-st.sidebar.subheader("Field State")
-zone_input = st.sidebar.selectbox("Current Zone", [FieldZone.OWN_HALF, FieldZone.OPP_HALF, FieldZone.RED_ZONE])
-ruck_input = st.sidebar.select_slider("Ball Speed", options=["slow", "normal", "quick"], value="normal")
+st.title("🏉 Elite Rugby Tactical Engine V3")
+st.markdown("### Intelligent Decision Support & Visualizer")
 
-st.sidebar.subheader("Key Player Stats")
-p_archetype = st.sidebar.selectbox("Ball Carrier Type", list(ARCHETYPES.keys()))
-p_form = st.sidebar.slider("Player Form (Carry Bonus)", 0.8, 1.5, ARCHETYPES[p_archetype].carry_bonus)
+# --- SIDEBAR ---
+st.sidebar.header("1. Match Context")
+source_input = st.sidebar.selectbox("Possession Source", [Source.OPEN_PLAY, Source.SCRUM, Source.LINEOUT])
+zone_input = st.sidebar.selectbox("Field Position", [FieldZone.OWN_HALF, FieldZone.OPP_HALF, FieldZone.RED_ZONE])
+ruck_input = st.sidebar.select_slider("Ruck Speed", options=["slow", "normal", "quick"], value="normal")
 
-# 3. Main Helper to create state
-def create_current_state():
-    # Update the archetype with the slider value
-    base_arch = ARCHETYPES[p_archetype]
-    modified_arch = Archetype(base_arch.name, p_form, base_arch.distribution_bonus, base_arch.collision_resistance, base_arch.decision_bonus)
-    
-    player = Player("Carrier", modified_arch)
-    ball = Ball(player)
-    ruck = Ruck(ruck_input)
-    return GameState(Team("Att", [player]), Team("Def", []), ball, zone=zone_input, ruck=ruck)
+st.sidebar.header("2. Opposition")
+defense_input = st.sidebar.selectbox("Defense System", [DefenseSystem.DRIFT, DefenseSystem.BLITZ, DefenseSystem.COMPRESSED])
 
-# 4. Main Page Layout
-st.title("Elite Rugby Tactical Engine")
-st.markdown("### AI-Powered Decision Support System")
+st.sidebar.header("3. Attack Setup")
+p_archetype = st.sidebar.selectbox("Ball Carrier", list(ARCHETYPES.keys()))
 
-col1, col2 = st.columns(2)
+# --- LOGIC ---
+def run_simulation(move_name, iterations=50):
+    gains = []
+    turnovers = 0
+    player = Player("Carrier", ARCHETYPES[p_archetype])
+    for _ in range(iterations):
+        state = GameState(zone_input, defense_input, ruck_input, source_input)
+        SHAPES[move_name].execute(state, player)
+        gains.append(state.meters_gained)
+        if state.turnover: turnovers += 1
+    return statistics.mean(gains), (turnovers/iterations)*100
 
-# --- PANEL 1: SINGLE PLAY SIMULATOR ---
+col1, col2 = st.columns([1, 1])
+
+# --- PANEL 1: AI MATRIX ---
 with col1:
-    st.info("🧪 Single Play Simulator")
-    selected_move = st.selectbox("Select a Move to Test", list(SHAPES.keys()))
+    st.subheader("🤖 AI Tactical Matrix")
     
-    if st.button("Run Simulation (50 times)"):
-        sim = RugbySimulator(SHAPES)
+    if st.button("Analyze All Options"):
         results = []
-        turnovers = 0
+        progress = st.progress(0)
         
-        for _ in range(50):
-            st_state = create_current_state()
-            outcome = sim.simulate(st_state, [selected_move])
-            results.append(outcome.meters)
-            if outcome.turnover: turnovers += 1
+        for i, (name, move) in enumerate(SHAPES.items()):
+            avg_gain, risk = run_simulation(name, iterations=100)
+            utility = avg_gain - (risk * 0.15)
+            results.append({"Move": name, "Gain": avg_gain, "Risk": risk, "Score": utility})
+            progress.progress((i + 1) / len(SHAPES))
             
-        avg = statistics.mean(results)
-        st.metric(label=f"Avg Gain ({selected_move})", value=f"{avg:.2f}m", delta=f"{turnovers/50*100:.0f}% Risk")
-        st.success(f"Simulated 50 runs. Max gain: {max(results):.1f}m")
+        df = pd.DataFrame(results).sort_values("Score", ascending=False)
+        best = df.iloc[0]
+        
+        st.success(f"🏆 RECOMMENDATION: **{best['Move']}**")
+        st.dataframe(df.style.highlight_max(axis=0, subset=['Gain', 'Score'], color='lightgreen'))
+        
+        # --- NEW: EXPORT REPORT ---
+        report_text = f"TACTICAL REPORT\n"
+        report_text += f"Scenario: {source_input} in {zone_input}\n"
+        report_text += f"Defense: {defense_input}\n"
+        report_text += f"Top Recommendation: {best['Move']} (Exp. Gain: {best['Gain']:.1f}m)\n\n"
+        report_text += "FULL DATA:\n" + df.to_string()
+        
+        st.download_button(
+            label="📄 Download Match Plan",
+            data=report_text,
+            file_name="match_plan.txt",
+            mime="text/plain"
+        )
 
-# --- PANEL 2: AI RECOMMENDER ---
+# --- PANEL 2: VISUAL SIMULATOR ---
 with col2:
-    st.warning("🤖 AI Assistant Coach")
-    st.write("Ask the engine to scan all moves and recommend the best option for this specific field position.")
+    st.subheader("📺 Visual Simulator")
+    selected_visual = st.selectbox("Select Move to Visualize", list(SHAPES.keys()))
     
-    if st.button("Find Best Play"):
-        sim = RugbySimulator(SHAPES)
-        rec = Recommender(sim)
+    if st.button(f"Run {selected_visual}"):
+        player = Player("Carrier", ARCHETYPES[p_archetype])
+        state = GameState(zone_input, defense_input, ruck_input, source_input)
+        SHAPES[selected_visual].execute(state, player)
         
-        with st.spinner("Running Monte Carlo Simulations..."):
-            scores = rec.recommend(create_current_state, list(SHAPES.keys()))
+        start_m = 20 if zone_input == FieldZone.OWN_HALF else 60 if zone_input == FieldZone.OPP_HALF else 85
+        fig = draw_pitch_outcome(start_m, state.meters_gained, selected_visual, state.turnover)
+        st.pyplot(fig)
         
-        # Convert to DataFrame for chart
-        data = []
-        for name, stats in scores.items():
-            data.append({"Move": name, "Meters": stats["avg_meters"], "Risk": stats["risk"]})
-        
-        df = pd.DataFrame(data).set_index("Move")
-        
-        # Find winner
-        best_move = df["Meters"].idxmax()
-        
-        st.subheader(f"Recommended: **{best_move}**")
-        st.bar_chart(df["Meters"])
-        st.table(df)
+        if state.turnover:
+            st.error("Possession Lost!")
+        else:
+            st.caption(f"Gain: +{state.meters_gained:.2f}m")
