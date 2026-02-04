@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Callable
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 from io import BytesIO
 
 # ==========================================
@@ -77,13 +77,14 @@ class ShapeMove:
     name: str
     risk: float
     base_gain: float
+    # New: Coaching Drill Content
+    drill_name: str
+    drill_desc: str
 
     def execute(self, state: GameState, carrier: Player):
-        # 1. Context Modifiers
         zone_mod = ZONE_MODIFIERS[state.zone]
         ruck_mult = {"quick": 1.2, "normal": 1.0, "slow": 0.7}[state.ruck_speed]
         
-        # 2. Defense Interaction
         def_stats = DEFENSE_LOGIC[state.defense_type]
         def_mod = 1.0
         
@@ -93,20 +94,16 @@ class ShapeMove:
             def_mod = 0.7
             state.turnover = True if random.random() < 0.4 else False
 
-        # 3. Source Bonus (Set Piece Platform)
-        # Structured plays (Scrum/Lineout) are 20% safer on first phase
         source_safety = 1.0
         if state.source in [Source.SCRUM, Source.LINEOUT] and state.phase == 1:
-            source_safety = 0.8 # Reduces risk
+            source_safety = 0.8 
 
-        # 4. Calculate Gain
         gain = (
             self.base_gain * ruck_mult * carrier.archetype.carry_bonus * zone_mod["gain"] * def_mod
         )
         gain *= random.uniform(0.8, 1.2)
         state.meters_gained += max(0, gain)
 
-        # 5. Calculate Risk
         error_prob = self.risk * zone_mod["risk"] * def_stats["risk_mod"] * source_safety
         error_prob /= carrier.archetype.decision_bonus
 
@@ -114,53 +111,98 @@ class ShapeMove:
             state.turnover = True
 
 # ==========================================
-# 2. VISUALIZATION ENGINE
+# 2. INTERACTIVE VISUALIZATION (PLOTLY)
 # ==========================================
 
-def draw_pitch_outcome(start_meters, gain, move_name, turnover):
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.set_facecolor('#2E8B57')
-    ax.set_xlim(0, 100)
-    ax.set_ylim(0, 50)
-    
-    lines = [0, 22, 50, 78, 100]
-    for line in lines:
-        ax.axvline(x=line, color='white', linestyle='-', alpha=0.7)
-    
-    ax.text(50, 2, "Halfway", color='white', ha='center', alpha=0.8)
-    ax.text(22, 2, "22m", color='white', ha='center', alpha=0.8)
-    
-    end_point = start_meters + gain
-    color = 'red' if turnover else 'yellow'
-    
-    ax.arrow(start_meters, 25, gain, 0, head_width=2, head_length=2, fc=color, ec=color, width=0.5)
-    ax.plot(start_meters, 25, 'bo', markersize=10)
-    
-    if turnover:
-        ax.text(end_point, 28, "❌ TURNOVER", color='white', fontweight='bold')
-    else:
-        ax.plot(end_point, 25, 'wo', markersize=10)
-        ax.text(end_point, 28, f"+{gain:.1f}m", color='white', fontweight='bold')
+def create_interactive_pitch(start_meters, gain, move_name, turnover):
+    fig = go.Figure()
 
-    ax.set_yticks([])
-    ax.set_title(f"Simulation: {move_name}", color='black')
+    # Draw Pitch Background (Green Rectangle)
+    fig.add_shape(type="rect", x0=0, y0=0, x1=100, y1=50,
+        line=dict(color="white", width=2), fillcolor="#2E8B57", layer="below")
+
+    # Draw Lines (Try Line, 22m, Halfway)
+    for x_line in [0, 22, 50, 78, 100]:
+        fig.add_shape(type="line", x0=x_line, y0=0, x1=x_line, y1=50,
+            line=dict(color="white", width=2, dash="dash"))
+    
+    # Add Text Annotations
+    fig.add_annotation(x=50, y=2, text="Halfway", showarrow=False, font=dict(color="white"))
+    fig.add_annotation(x=22, y=2, text="22m", showarrow=False, font=dict(color="white"))
+
+    # Plot the Play (Arrow)
+    end_point = start_meters + gain
+    arrow_color = "red" if turnover else "yellow"
+    
+    fig.add_annotation(
+        x=end_point, y=25, ax=start_meters, ay=25,
+        xref="x", yref="y", axref="x", ayref="y",
+        arrowhead=2, arrowwidth=4, arrowcolor=arrow_color,
+        text=f"+{gain:.1f}m" if not turnover else "TURNOVER",
+        font=dict(size=14, color="white", family="Arial Black"),
+        bgcolor="black"
+    )
+
+    # Player Marker (Start)
+    fig.add_trace(go.Scatter(
+        x=[start_meters], y=[25],
+        mode='markers+text',
+        marker=dict(size=15, color='blue', line=dict(width=2, color='white')),
+        text=["Start"], textposition="top center",
+        name="Ruck"
+    ))
+
+    # Layout Updates for Mobile
+    fig.update_layout(
+        title=f"Simulation: {move_name}",
+        xaxis=dict(range=[-5, 105], showgrid=False, zeroline=False, visible=False, fixedrange=False), # fixedrange=False allows zoom
+        yaxis=dict(range=[0, 50], showgrid=False, zeroline=False, visible=False),
+        height=300,
+        margin=dict(l=10, r=10, t=40, b=10),
+        plot_bgcolor="rgba(0,0,0,0)",
+        dragmode="pan" # Allows dragging/panning on mobile
+    )
     return fig
 
 # ==========================================
-# 3. DASHBOARD INTERFACE
+# 3. DATA & DRILLS
 # ==========================================
 
 SHAPES = {
-    "Power Pod": ShapeMove("Power Pod", 0.10, 3.5),
-    "Tip On": ShapeMove("Tip On", 0.15, 4.8),
-    "Out The Back": ShapeMove("Out The Back", 0.25, 7.5),
-    "Screen Play": ShapeMove("Screen Play", 0.20, 6.4),
-    "Edge Sweep": ShapeMove("Edge Sweep", 0.18, 5.8),
+    "Power Pod": ShapeMove(
+        "Power Pod", 0.10, 3.5, 
+        "2v1 Contact Box", 
+        "Set up a 5m square. 2 Defenders with pads vs 3 Attackers. Aim is to win the collision line, not pass."
+    ),
+    "Tip On": ShapeMove(
+        "Tip On", 0.15, 4.8, 
+        "Square Drill - Late Pass", 
+        "3 Attackers run at 2 Defenders. First receiver commits the defender and passes LATE (just before contact) to the short runner."
+    ),
+    "Out The Back": ShapeMove(
+        "Out The Back", 0.25, 7.5, 
+        "L-Shape Wave Passing", 
+        "Use 3 groups of 3. Ball starts at one end. Middle man creates the 'back door' option by wrapping around."
+    ),
+    "Screen Play": ShapeMove(
+        "Screen Play", 0.20, 6.4, 
+        "Blocker & Slider", 
+        "Front runner runs a hard line to 'block' (legally) the drift defense, while the 10 slides behind to receive."
+    ),
+    "Edge Sweep": ShapeMove(
+        "Edge Sweep", 0.18, 5.8, 
+        "Touchline Sprint 2v1", 
+        "Use the 15m channel. Winger and Fullback vs 1 Defender. Practice preserving space on the outside."
+    ),
 }
 
-st.set_page_config(page_title="Rugby Tactical Engine V3", layout="wide")
+# ==========================================
+# 4. DASHBOARD
+# ==========================================
 
-st.title("🏉 Elite Rugby Tactical Engine V3")
+st.set_page_config(page_title="Rugby Tactical Engine V4", layout="wide", initial_sidebar_state="expanded")
+
+st.title("🏉 Elite Rugby Tactical Engine V4")
 st.markdown("### Intelligent Decision Support & Visualizer")
 
 # --- SIDEBAR ---
@@ -200,32 +242,24 @@ with col1:
         for i, (name, move) in enumerate(SHAPES.items()):
             avg_gain, risk = run_simulation(name, iterations=100)
             utility = avg_gain - (risk * 0.15)
-            results.append({"Move": name, "Gain": avg_gain, "Risk": risk, "Score": utility})
+            results.append({"Move": name, "Gain": avg_gain, "Risk": risk, "Score": utility, "Drill": move.drill_name})
             progress.progress((i + 1) / len(SHAPES))
             
         df = pd.DataFrame(results).sort_values("Score", ascending=False)
         best = df.iloc[0]
         
         st.success(f"🏆 RECOMMENDATION: **{best['Move']}**")
-        st.dataframe(df.style.highlight_max(axis=0, subset=['Gain', 'Score'], color='lightgreen'))
+        st.dataframe(df[['Move', 'Gain', 'Risk', 'Score']].style.highlight_max(axis=0, subset=['Gain', 'Score'], color='lightgreen'))
         
-        # --- NEW: EXPORT REPORT ---
-        report_text = f"TACTICAL REPORT\n"
-        report_text += f"Scenario: {source_input} in {zone_input}\n"
-        report_text += f"Defense: {defense_input}\n"
-        report_text += f"Top Recommendation: {best['Move']} (Exp. Gain: {best['Gain']:.1f}m)\n\n"
-        report_text += "FULL DATA:\n" + df.to_string()
-        
-        st.download_button(
-            label="📄 Download Match Plan",
-            data=report_text,
-            file_name="match_plan.txt",
-            mime="text/plain"
-        )
+        # --- NEW: COACHING CORNER ---
+        st.info(f"👨‍🏫 **Coaching Focus: {best['Move']}**")
+        st.write(f"**Drill:** {best['Drill']}")
+        st.write(f"**How to practice:** {SHAPES[best['Move']].drill_desc}")
 
-# --- PANEL 2: VISUAL SIMULATOR ---
+# --- PANEL 2: INTERACTIVE VISUAL SIMULATOR ---
 with col2:
-    st.subheader("📺 Visual Simulator")
+    st.subheader("📺 Visual Simulator (Interactive)")
+    st.caption("ℹ️ Pinch to zoom, drag to pan")
     selected_visual = st.selectbox("Select Move to Visualize", list(SHAPES.keys()))
     
     if st.button(f"Run {selected_visual}"):
@@ -234,10 +268,12 @@ with col2:
         SHAPES[selected_visual].execute(state, player)
         
         start_m = 20 if zone_input == FieldZone.OWN_HALF else 60 if zone_input == FieldZone.OPP_HALF else 85
-        fig = draw_pitch_outcome(start_m, state.meters_gained, selected_visual, state.turnover)
-        st.pyplot(fig)
+        
+        # Call the new Plotly Function
+        fig = create_interactive_pitch(start_m, state.meters_gained, selected_visual, state.turnover)
+        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
         
         if state.turnover:
             st.error("Possession Lost!")
         else:
-            st.caption(f"Gain: +{state.meters_gained:.2f}m")
+            st.success(f"Gain: +{state.meters_gained:.2f}m")
