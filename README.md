@@ -1,3 +1,10 @@
+Here is a professional `README.md` file tailored for your project. You can copy and paste this text directly into a new file named `README.md` in your project folder.
+
+This documentation is written to help both you (the developer) and your brother (the user) understand how to install, run, and interpret the application.
+
+---
+
+```markdown
 # 🏉 Elite Rugby Union Tactical Engine
 
 ### AI-Powered Decision Support System for Rugby Union
@@ -34,3 +41,70 @@ Open your terminal (or Command Prompt) and run the following command to install 
 
 ```bash
 pip install streamlit pandas
+
+```
+
+### 2. Run the Application
+
+Navigate to the project folder in your terminal and execute:
+
+```bash
+streamlit run RugbySimEngine.py
+
+```
+
+*Note: This will automatically open the dashboard in your default web browser.*
+
+---
+
+## 📖 User Guide
+
+### The Dashboard Interface
+
+#### 1. Left Sidebar: Match Context
+
+Use this panel to "set the scene" before running a simulation.
+
+* **Current Zone:** Where is the ball? (Red Zone = higher turnover risk, compressed defense).
+* **Ball Speed:** How quick was the ruck? (Quick ball massively increases potential gains).
+* **Player Stats:** Adjust the form of your key ball carrier.
+
+#### 2. Single Play Simulator (Testing Lab)
+
+* **Goal:** Test a specific hunch (e.g., "Is a 'Tip On' safe to run on our own 5m line?").
+* **Action:** Select a move and click "Run Simulation."
+* **Output:** Shows the average meters gained and the calculated risk percentage based on 50 simulated attempts.
+
+#### 3. AI Assistant Coach (Recommender)
+
+* **Goal:** Ask the computer for the optimal strategy.
+* **Action:** Click "Find Best Play."
+* **Output:** The system runs hundreds of simulations for *every* move in the playbook and produces a ranked bar chart showing the most effective options for the current game state.
+
+---
+
+## 🧠 The Math Behind the Engine
+
+The simulator uses a probabilistic model defined by the following logic:
+
+* **Variance:** A random noise factor (0.8 to 1.2) is applied to every single run to mimic the unpredictability of live sport.
+* **Risk Calculation:** The probability of a turnover is weighed against the ball carrier's `Decision Bonus`. A "Playmaker" is less likely to knock on during a complex move than a "Power" player.
+
+---
+
+## 🔮 Future Roadmap
+
+* [ ] **Visual Field:** Graphical representation of the pitch showing the gain line.
+* [ ] **Defensive Systems:** Add a selector for "Blitz", "Drift", or "Soft" defenses to counter specific shapes.
+* [ ] **Set Piece:** Modeling outcomes from Scrums and Lineouts.
+* [ ] **PDF Export:** Save simulation reports for post-match analysis.
+
+---
+
+## License
+
+This project is open for educational and analytical use.
+
+```
+
+```
