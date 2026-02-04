@@ -1,10 +1,3 @@
-Here is a professional `README.md` file tailored for your project. You can copy and paste this text directly into a new file named `README.md` in your project folder.
-
-This documentation is written to help both you (the developer) and your brother (the user) understand how to install, run, and interpret the application.
-
----
-
-```markdown
 # 🏉 Elite Rugby Union Tactical Engine
 
 ### AI-Powered Decision Support System for Rugby Union
