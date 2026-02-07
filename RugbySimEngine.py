@@ -1,75 +1,50 @@
 import random
 import statistics
 from dataclasses import dataclass, field
-from typing import List, Dict, Callable
+from typing import List, Dict, Optional
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 
 # ==========================================
-# 1. CORE LOGIC & PHYSICS ENGINE
+# 1. NEW: COMPETITION & DEFENSE MODELS
 # ==========================================
 
-class FieldZone:
-    OWN_HALF = "Own Half (0-50m)"
-    OPP_HALF = "Opp Half (50-22m)"
-    RED_ZONE = "Red Zone (<22m)"
+class CompetitionLevel:
+    U15 = "U15 School"
+    U18 = "U18 Academy"
+    SENIOR = "Senior Club"
+    PRO = "Professional"
 
-ZONE_MODIFIERS = {
-    FieldZone.OWN_HALF: {"gain": 0.9, "risk": 0.9},
-    FieldZone.OPP_HALF: {"gain": 1.0, "risk": 1.0},
-    FieldZone.RED_ZONE: {"gain": 0.6, "risk": 1.4},
+# How the level affects the game physics
+LEVEL_TUNING = {
+    CompetitionLevel.U15: {"speed_mod": 0.8, "error_margin": 1.3, "fatigue": 0.9},
+    CompetitionLevel.U18: {"speed_mod": 0.9, "error_margin": 1.1, "fatigue": 1.0},
+    CompetitionLevel.SENIOR: {"speed_mod": 1.0, "error_margin": 1.0, "fatigue": 1.1},
+    CompetitionLevel.PRO: {"speed_mod": 1.2, "error_margin": 0.7, "fatigue": 1.3},
 }
-
-class DefenseSystem:
-    DRIFT = "Drift Defense"
-    BLITZ = "Blitz Defense"
-    COMPRESSED = "Compressed/Heavy Ruck"
-
-DEFENSE_LOGIC = {
-    DefenseSystem.DRIFT: {
-        "weakness": "Power Pod", "strength": "Edge Sweep", "risk_mod": 0.8
-    },
-    DefenseSystem.BLITZ: {
-        "weakness": "Tip On", "strength": "Out The Back", "risk_mod": 1.5
-    },
-    DefenseSystem.COMPRESSED: {
-        "weakness": "Out The Back", "strength": "Power Pod", "risk_mod": 1.1
-    }
-}
-
-class Source:
-    OPEN_PLAY = "Open Play / Turnover"
-    SCRUM = "Scrum (Stable Platform)"
-    LINEOUT = "Lineout (Stable Platform)"
 
 @dataclass
-class Archetype:
+class DefensiveProfile:
     name: str
-    carry_bonus: float
-    decision_bonus: float
+    line_speed: float  # Multiplier for risk
+    bite_prob: float   # Chance they over-commit (creating space)
+    width_hold: float  # How well they cover the edge
 
-ARCHETYPES = {
-    "Power 12": Archetype("Power 12", 1.3, 1.0),
-    "Playmaker 10": Archetype("Playmaker 10", 0.9, 1.3),
-    "Edge Finisher": Archetype("Edge Finisher", 1.2, 1.1),
-    "Forward Pod": Archetype("Forward Pod", 1.1, 0.9),
+DEFENSE_SYSTEMS = {
+    "Drift": DefensiveProfile("Drift", 0.9, 0.25, 0.8),
+    "Blitz": DefensiveProfile("Blitz", 1.3, 0.75, 0.2), # High speed, high bite (risky but aggressive)
+    "Compressed": DefensiveProfile("Compressed", 1.1, 0.4, 0.9),
 }
 
-@dataclass
-class Player:
-    name: str
-    archetype: Archetype
+# ==========================================
+# 2. CORE LOGIC & PLAYBOOK STRUCTURES
+# ==========================================
 
 @dataclass
-class GameState:
-    zone: str
-    defense_type: str
-    ruck_speed: str
-    source: str
-    phase: int = 1
-    meters_gained: float = 0.0
-    turnover: bool = False
+class PlayerKPI:
+    role: str
+    target: str
 
 @dataclass
 class ShapeMove:
@@ -78,204 +53,248 @@ class ShapeMove:
     base_gain: float
     drill_name: str
     drill_desc: str
-    video_url: str  # <--- NEW: Video Link Field
+    video_url: str
+    kpis: Dict[int, List[PlayerKPI]] = field(default_factory=dict) # NEW: Jersey specific goals
 
-    def execute(self, state: GameState, carrier: Player):
-        zone_mod = ZONE_MODIFIERS[state.zone]
-        ruck_mult = {"quick": 1.2, "normal": 1.0, "slow": 0.7}[state.ruck_speed]
-        
-        def_stats = DEFENSE_LOGIC[state.defense_type]
-        def_mod = 1.0
-        
-        if self.name == def_stats["weakness"]:
-            def_mod = 1.3 
-        elif self.name == def_stats["strength"]:
-            def_mod = 0.7
-            state.turnover = True if random.random() < 0.4 else False
+@dataclass
+class PhaseNode:
+    phase: int
+    move_name: str
+    # Logic: If Defense does X -> We go to Node Y
+    triggers: Dict[str, str] 
 
-        source_safety = 1.0
-        if state.source in [Source.SCRUM, Source.LINEOUT] and state.phase == 1:
-            source_safety = 0.8 
+class FieldZone:
+    OWN_HALF = "Own Half"
+    OPP_HALF = "Opp Half"
+    RED_ZONE = "Red Zone"
 
-        gain = (
-            self.base_gain * ruck_mult * carrier.archetype.carry_bonus * zone_mod["gain"] * def_mod
-        )
-        gain *= random.uniform(0.8, 1.2)
-        state.meters_gained += max(0, gain)
-
-        error_prob = self.risk * zone_mod["risk"] * def_stats["risk_mod"] * source_safety
-        error_prob /= carrier.archetype.decision_bonus
-
-        if random.random() < error_prob:
-            state.turnover = True
+ZONE_MODIFIERS = {
+    FieldZone.OWN_HALF: {"gain": 0.9, "risk": 0.9},
+    FieldZone.OPP_HALF: {"gain": 1.0, "risk": 1.0},
+    FieldZone.RED_ZONE: {"gain": 0.6, "risk": 1.4},
+}
 
 # ==========================================
-# 2. INTERACTIVE VISUALIZATION
-# ==========================================
-
-def create_interactive_pitch(start_meters, gain, move_name, turnover):
-    fig = go.Figure()
-
-    fig.add_shape(type="rect", x0=0, y0=0, x1=100, y1=50,
-        line=dict(color="white", width=2), fillcolor="#2E8B57", layer="below")
-
-    for x_line in [0, 22, 50, 78, 100]:
-        fig.add_shape(type="line", x0=x_line, y0=0, x1=x_line, y1=50,
-            line=dict(color="white", width=2, dash="dash"))
-    
-    fig.add_annotation(x=50, y=2, text="Halfway", showarrow=False, font=dict(color="white"))
-    fig.add_annotation(x=22, y=2, text="22m", showarrow=False, font=dict(color="white"))
-
-    end_point = start_meters + gain
-    arrow_color = "red" if turnover else "yellow"
-    
-    fig.add_annotation(
-        x=end_point, y=25, ax=start_meters, ay=25,
-        xref="x", yref="y", axref="x", ayref="y",
-        arrowhead=2, arrowwidth=4, arrowcolor=arrow_color,
-        text=f"+{gain:.1f}m" if not turnover else "TURNOVER",
-        font=dict(size=14, color="white", family="Arial Black"),
-        bgcolor="black"
-    )
-
-    fig.add_trace(go.Scatter(
-        x=[start_meters], y=[25],
-        mode='markers+text',
-        marker=dict(size=15, color='blue', line=dict(width=2, color='white')),
-        text=["Ruck"], textposition="top center",
-        name="Start"
-    ))
-
-    fig.update_layout(
-        title=f"Simulation: {move_name}",
-        xaxis=dict(range=[-5, 105], showgrid=False, zeroline=False, visible=False, fixedrange=False),
-        yaxis=dict(range=[0, 50], showgrid=False, zeroline=False, visible=False),
-        height=300,
-        margin=dict(l=10, r=10, t=40, b=10),
-        plot_bgcolor="rgba(0,0,0,0)",
-        dragmode="pan"
-    )
-    return fig
-
-# ==========================================
-# 3. DATA & VIDEOS
+# 3. THE PLAYBOOK DATABASE (MERGED)
 # ==========================================
 
 SHAPES = {
     "Power Pod": ShapeMove(
         "Power Pod", 0.10, 3.5, 
-        "2v1 Contact Box", 
-        "Set up a 5m square. 2 Defenders with pads vs 3 Attackers. Aim is to win the collision line.",
-        "https://www.youtube.com/watch?v=3JDPoVFQNu4" # Pod work drill
+        "2v1 Contact Box", "Set up a 5m square. Aim to win the collision line.",
+        "https://www.youtube.com/watch?v=3JDPoVFQNu4",
+        kpis={
+            12: [PlayerKPI("Carrier", "Dominant Collision > 1m")],
+            9: [PlayerKPI("Scrumhalf", "Pass speed < 0.8s")]
+        }
     ),
     "Tip On": ShapeMove(
         "Tip On", 0.15, 4.8, 
-        "Square Drill - Late Pass", 
-        "First receiver commits the defender and passes LATE (just before contact) to the short runner.",
-        "https://www.youtube.com/shorts/9IQOqVD7DLA" # 2v1 High Tempo drill
+        "Square Drill - Late Pass", "First receiver passes LATE (just before contact).",
+        "https://www.youtube.com/shorts/9IQOqVD7DLA",
+        kpis={
+            10: [PlayerKPI("First Receiver", "Fix defender hips square")],
+            12: [PlayerKPI("Tip Runner", "Change of angle pre-catch")]
+        }
     ),
     "Out The Back": ShapeMove(
         "Out The Back", 0.25, 7.5, 
-        "L-Shape Wave Passing", 
-        "Use 3 groups of 3. Ball starts at one end. Middle man creates the 'back door' option.",
-        "https://www.youtube.com/shorts/BSBupzALOKg" # The user's specific request
-    ),
-    "Screen Play": ShapeMove(
-        "Screen Play", 0.20, 6.4, 
-        "Blocker & Slider", 
-        "Front runner runs a hard line to 'block' (legally) the drift defense, while the 10 slides behind.",
-        "https://www.youtube.com/watch?v=WBHeYJtrpVA" # Screen pass analysis
+        "L-Shape Wave Passing", "Middle man creates the 'back door' option.",
+        "https://www.youtube.com/shorts/BSBupzALOKg",
+        kpis={
+            10: [PlayerKPI("Playmaker", "Look inside before passing out")],
+            15: [PlayerKPI("Second Receiver", "Depth > 3m from gainline")]
+        }
     ),
     "Edge Sweep": ShapeMove(
         "Edge Sweep", 0.18, 5.8, 
-        "Touchline Sprint 2v1", 
-        "Use the 15m channel. Winger and Fullback vs 1 Defender. Practice preserving space.",
-        "https://www.youtube.com/shorts/OqzahAKVBII" # Edge attack drill
+        "Touchline Sprint 2v1", "Preserve space on the outside.",
+        "https://www.youtube.com/shorts/OqzahAKVBII",
+        kpis={
+            11: [PlayerKPI("Winger", "Stay wide until ball release")],
+            15: [PlayerKPI("Fullback", "Call play early")]
+        }
     ),
 }
 
+# A predefined Decision Tree for the "Playbook" tab
+ATTACK_TREE = {
+    "start": PhaseNode(1, "Power Pod", {"Defense Narrows": "wide", "Defense Drifts": "tight"}),
+    "wide": PhaseNode(2, "Out The Back", {"Winger Bites": "edge", "Winger Drifts": "cutback"}),
+    "tight": PhaseNode(2, "Tip On", {"Gap Opens": "break", "Contact Made": "recycle"}),
+    "edge": PhaseNode(3, "Edge Sweep", {}),
+}
+
 # ==========================================
-# 4. DASHBOARD
+# 4. SIMULATION ENGINE
 # ==========================================
 
-st.set_page_config(page_title="Rugby Tactical Engine", layout="wide")
-
-st.title("🏉 Elite Rugby Tactical Engine")
-st.markdown("### Intelligent Decision Support & Visualizer")
-
-# --- SIDEBAR ---
-st.sidebar.header("1. Match Context")
-source_input = st.sidebar.selectbox("Possession Source", [Source.OPEN_PLAY, Source.SCRUM, Source.LINEOUT])
-zone_input = st.sidebar.selectbox("Field Position", [FieldZone.OWN_HALF, FieldZone.OPP_HALF, FieldZone.RED_ZONE])
-ruck_input = st.sidebar.select_slider("Ruck Speed", options=["slow", "normal", "quick"], value="normal")
-
-st.sidebar.header("2. Opposition")
-defense_input = st.sidebar.selectbox("Defense System", [DefenseSystem.DRIFT, DefenseSystem.BLITZ, DefenseSystem.COMPRESSED])
-
-st.sidebar.header("3. Attack Setup")
-p_archetype = st.sidebar.selectbox("Ball Carrier", list(ARCHETYPES.keys()))
-
-# --- LOGIC ---
-def run_simulation(move_name, iterations=50):
+def run_simulation(move_name, zone, defense_name, level_name, iterations=50):
+    move = SHAPES[move_name]
+    defense = DEFENSE_SYSTEMS[defense_name]
+    level_stats = LEVEL_TUNING[level_name]
+    
     gains = []
     turnovers = 0
-    player = Player("Carrier", ARCHETYPES[p_archetype])
+    
     for _ in range(iterations):
-        state = GameState(zone_input, defense_input, ruck_input, source_input)
-        SHAPES[move_name].execute(state, player)
-        gains.append(state.meters_gained)
-        if state.turnover: turnovers += 1
+        # Physics Calculation
+        zone_mod = ZONE_MODIFIERS[zone]
+        
+        # Defense Interaction (New Logic)
+        def_impact = 1.0
+        # If Blitz (high line speed), wide moves are riskier but shorter moves gain more if successful
+        if defense.line_speed > 1.1 and "Wide" in move.name:
+            def_impact = 0.6 # Blitz kills wide play
+        elif defense.name == "Drift" and "Pod" in move.name:
+            def_impact = 0.8 # Drift absorbs power
+            
+        # Level Impact
+        # Pro level means tighter margins (higher risk) but faster execution (more gain)
+        level_gain_bonus = level_stats["speed_mod"]
+        
+        # Final Gain Calc
+        gain = (move.base_gain * zone_mod["gain"] * def_impact * level_gain_bonus)
+        gain *= random.uniform(0.8, 1.2)
+        
+        # Risk Calc
+        risk_threshold = move.risk * zone_mod["risk"] * defense.line_speed / level_stats["error_margin"]
+        
+        if random.random() < risk_threshold:
+            turnovers += 1
+            gains.append(0)
+        else:
+            gains.append(max(0, gain))
+            
     return statistics.mean(gains), (turnovers/iterations)*100
 
-col1, col2 = st.columns([1, 1])
-
-# --- PANEL 1: AI MATRIX & VIDEO ---
-with col1:
-    st.subheader("🤖 AI Tactical Matrix")
+def create_interactive_pitch(gain, move_name, turnover):
+    fig = go.Figure()
+    # Green Pitch
+    fig.add_shape(type="rect", x0=0, y0=0, x1=100, y1=50, line=dict(color="white"), fillcolor="#2E8B57", layer="below")
+    # Lines
+    for x in [0, 22, 50, 78, 100]:
+        fig.add_shape(type="line", x0=x, y0=0, x1=x, y1=50, line=dict(color="white", dash="dash"))
     
-    if st.button("Analyze All Options"):
-        results = []
-        progress = st.progress(0)
+    start_m = 50 # Simplified start for visualization
+    end_m = start_m + gain
+    color = "red" if turnover else "yellow"
+    
+    # Arrow
+    fig.add_annotation(x=end_m, y=25, ax=start_m, ay=25, xref="x", yref="y", axref="x", ayref="y",
+                       arrowhead=2, arrowwidth=4, arrowcolor=color,
+                       text=f"+{gain:.1f}m" if not turnover else "TURNOVER",
+                       font=dict(size=14, color="white"), bgcolor="black")
+    
+    fig.update_layout(xaxis=dict(visible=False, range=[0,100]), yaxis=dict(visible=False, range=[0,50]), 
+                      margin=dict(l=0,r=0,t=0,b=0), height=250, plot_bgcolor="rgba(0,0,0,0)")
+    return fig
+
+# ==========================================
+# 5. UI INTERFACE (STREAMLIT)
+# ==========================================
+
+st.set_page_config(page_title="Universal Rugby Platform", layout="wide")
+st.title("🏉 Universal Coaching Platform V6")
+
+# --- SIDEBAR CONFIG ---
+st.sidebar.header("Match Configuration")
+level_input = st.sidebar.selectbox("Competition Level", list(LEVEL_TUNING.keys()), index=2)
+st.sidebar.caption(f"Physics Mode: {level_input}")
+
+# --- TABS FOR DIFFERENT MODES ---
+tab1, tab2, tab3 = st.tabs(["🎮 Simulator", "📖 Digital Playbook", "📝 Game Review"])
+
+# --- TAB 1: SIMULATOR (The V5 Tool) ---
+with tab1:
+    col1, col2 = st.columns([1,1])
+    
+    with col1:
+        st.subheader("Predictive Engine")
+        zone_in = st.selectbox("Zone", list(ZONE_MODIFIERS.keys()))
+        def_in = st.selectbox("Opponent Defense", list(DEFENSE_SYSTEMS.keys()))
         
-        for i, (name, move) in enumerate(SHAPES.items()):
-            avg_gain, risk = run_simulation(name, iterations=100)
-            utility = avg_gain - (risk * 0.15)
-            results.append({"Move": name, "Gain": avg_gain, "Risk": risk, "Score": utility})
-            progress.progress((i + 1) / len(SHAPES))
+        if st.button("Run Prediction"):
+            results = []
+            for name in SHAPES.keys():
+                avg, risk = run_simulation(name, zone_in, def_in, level_input)
+                # Smart Score
+                score = avg - (risk * 0.2)
+                results.append({"Move": name, "Gain": avg, "Risk": risk, "Score": score})
             
-        df = pd.DataFrame(results).sort_values("Score", ascending=False)
-        best_row = df.iloc[0]
-        best_move_name = best_row['Move']
-        best_move_data = SHAPES[best_move_name]
-        
-        st.success(f"🏆 RECOMMENDATION: **{best_move_name}**")
-        st.dataframe(df[['Move', 'Gain', 'Risk', 'Score']].style.highlight_max(axis=0, subset=['Gain', 'Score'], color='lightgreen'))
-        
-        # --- NEW: VIDEO PLAYER ---
-        st.info(f"👨‍🏫 **Coaching Focus: {best_move_name}**")
-        st.write(f"**Drill:** {best_move_data.drill_name}")
-        st.write(f"**Description:** {best_move_data.drill_desc}")
-        
-        st.markdown("---")
-        st.markdown("**📺 Watch Drill Video:**")
-        st.video(best_move_data.video_url)
+            df = pd.DataFrame(results).sort_values("Score", ascending=False)
+            best = df.iloc[0]
+            
+            st.success(f"Best Call: **{best['Move']}**")
+            st.dataframe(df[['Move', 'Gain', 'Risk']].style.format("{:.1f}"))
+            
+            # Show Video for Best Move
+            st.markdown("---")
+            st.video(SHAPES[best['Move']].video_url)
 
-# --- PANEL 2: INTERACTIVE VISUAL SIMULATOR ---
-with col2:
-    st.subheader("📺 Visual Simulator")
-    selected_visual = st.selectbox("Select Move to Visualize", list(SHAPES.keys()))
+    with col2:
+        st.subheader("Visualizer")
+        move_to_viz = st.selectbox("Select Move", list(SHAPES.keys()))
+        if st.button(f"Visualize {move_to_viz}"):
+            avg, risk = run_simulation(move_to_viz, zone_in, def_in, level_input)
+            is_turnover = random.random() < (risk/100)
+            fig = create_interactive_pitch(avg, move_to_viz, is_turnover)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Show KPIs
+            st.info("🎯 **Player KPIs for this move:**")
+            kpis = SHAPES[move_to_viz].kpis
+            for num, goals in kpis.items():
+                for g in goals:
+                    st.write(f"**#{num} ({g.role}):** {g.target}")
+
+# --- TAB 2: DIGITAL PLAYBOOK (Phase Trees) ---
+with tab2:
+    st.header("Phase Decision Trees")
+    st.markdown("Structure your attack based on triggers, not just memorization.")
     
-    if st.button(f"Run {selected_visual}"):
-        player = Player("Carrier", ARCHETYPES[p_archetype])
-        state = GameState(zone_input, defense_input, ruck_input, source_input)
-        SHAPES[selected_visual].execute(state, player)
+    col_a, col_b = st.columns(2)
+    
+    with col_a:
+        st.subheader("Phase 1: Setup")
+        st.markdown(f"**Call: {ATTACK_TREE['start'].move_name}**")
+        trigger = st.radio("What did the defense do?", list(ATTACK_TREE['start'].triggers.keys()))
         
-        start_m = 20 if zone_input == FieldZone.OWN_HALF else 60 if zone_input == FieldZone.OPP_HALF else 85
+    with col_b:
+        st.subheader("Phase 2: Reaction")
+        next_key = ATTACK_TREE['start'].triggers[trigger]
+        next_node = ATTACK_TREE[next_key]
+        st.markdown(f"**Call: {next_node.move_name}**")
         
-        fig = create_interactive_pitch(start_m, state.meters_gained, selected_visual, state.turnover)
-        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
-        
-        if state.turnover:
-            st.error("Possession Lost!")
+        if next_node.triggers:
+            st.write("Next Triggers:")
+            for t, k in next_node.triggers.items():
+                st.write(f"- If {t} -> Go to Phase 3")
         else:
-            st.success(f"Gain: +{state.meters_gained:.2f}m")
+            st.success("✅ Line Break / Try Time")
+
+# --- TAB 3: GAME REVIEW (Validation Mode) ---
+with tab3:
+    st.header("Post-Match Validator")
+    st.write("Input a scenario from Saturday's game to see if the decision aligned with the system.")
+    
+    with st.form("review_form"):
+        r_phase = st.number_input("Phase Number", 1, 10)
+        r_call = st.selectbox("Call Made", list(SHAPES.keys()))
+        r_def = st.selectbox("Defense Seen", ["Drift", "Blitz", "Narrow"])
+        r_outcome = st.selectbox("Outcome", ["Gainline", "Turnover", "Clean Break"])
+        
+        submitted = st.form_submit_button("Analyze Decision")
+        
+        if submitted:
+            st.divider()
+            # Simple Logic Check
+            if r_def == "Blitz" and "Wide" in r_call:
+                st.error("❌ **Tactical Mismatch:** Running Wide against a Blitz is high risk. Recommended: Short/Tip On.")
+            elif r_def == "Drift" and "Pod" in r_call:
+                 st.warning("⚠️ **Inefficient:** Pods into a Drift defense often stall. Better to attack the edge.")
+            else:
+                st.success("✅ **Good Decision:** The call matched the defensive profile.")
+            
+            st.caption(f"Logged Event: Phase {r_phase} | {r_call} vs {r_def}")
+
