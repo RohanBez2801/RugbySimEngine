@@ -195,7 +195,7 @@ def create_interactive_pitch(gain, move_name, turnover):
 # ==========================================
 
 st.set_page_config(page_title="Universal Rugby Platform", layout="wide")
-st.title("🏉 Universal Coaching Platform V6")
+st.title("🏉 Universal Coaching Platform V6.1")
 
 # --- SIDEBAR CONFIG ---
 st.sidebar.header("Match Configuration")
@@ -226,7 +226,10 @@ with tab1:
             best = df.iloc[0]
             
             st.success(f"Best Call: **{best['Move']}**")
-            st.dataframe(df[['Move', 'Gain', 'Risk']].style.format("{:.1f}"))
+            
+            # --- FIX APPLIED HERE ---
+            # We specifically format only the 'Gain' and 'Risk' columns, leaving 'Move' as text
+            st.dataframe(df[['Move', 'Gain', 'Risk']].style.format({"Gain": "{:.1f}", "Risk": "{:.1f}"}))
             
             # Show Video for Best Move
             st.markdown("---")
@@ -297,4 +300,3 @@ with tab3:
                 st.success("✅ **Good Decision:** The call matched the defensive profile.")
             
             st.caption(f"Logged Event: Phase {r_phase} | {r_call} vs {r_def}")
-
